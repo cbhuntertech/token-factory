@@ -1,0 +1,240 @@
+token-factory/
+├── contracts/
+│   ├── Token.sol
+│   └── TokenFactory.sol
+├── test/
+│   └── TokenFactory.test.js
+├── scripts/
+│   └── deploy.js
+├── hardhat.config.js
+└── package.json
+
+
+
+Текущие зависимости (package.json):
+{
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.9.0",
+    "@uniswap/v2-core": "^1.0.1",
+    "@uniswap/v2-periphery": "^1.1.0-beta.0",
+    "@uniswap/v3-core": "^1.0.1",
+    "@uniswap/v3-periphery": "^1.4.3"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.0",
+    "@nomicfoundation/hardhat-ethers": "^3.0.5",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.0",
+    "@typechain/ethers-v6": "^0.5.0",
+    "@typechain/hardhat": "^9.0.0",
+    "@types/chai": "^4.3.5",
+    "@types/mocha": "^10.0.1",
+    "chai": "^4.3.7",
+    "hardhat": "^2.19.4",
+    "hardhat-gas-reporter": "^1.0.9",
+    "solidity-coverage": "^0.8.5",
+    "ts-node": "^10.9.1",
+    "typechain": "^8.3.0",
+    "typescript": "^5.0.4"
+  }
+}
+-
+Статус тестов:
+14 тестов проходят
+14 тестов падают из-за:
+Неправильных проверок ошибок (revertedWith -> revertedWithMatch)
+Устаревших математических операций (mul/div -> /)
+Проблем с BigInt
+Устаревших методов ethers
+Следующие шаги:
+Исправить оставшиеся тесты
+Настроить деплой в тестнете
+Добавить верификацию контракта
+Протестировать в тестовой сети
+5. hardhat.config.js:
+require("@nomicfoundation/hardhat-toolbox");
+
+module.exports = {
+  solidity: {
+    version: "0.8.19",
+    settings: {
+      optimizer: {
+        enabled: true,
+        runs: 200
+      },
+      viaIR: true
+    }
+  }
+};
+-
+Завтра можем начать с:
+Исправления оставшихся тестов
+Или сразу перейти к настройке деплоя в тестнете
+Или начать с верификации контракта
+Выберем направление в зависимости от ваших приоритетов.
+-
+
+-Основные изменения, которые нужно внести в тесты:
+// Примеры исправлений для тестов
+describe("TokenFactory", function() {
+  // ... существующий код ...
+
+  it("Should fail if fee is not paid", async function() {
+    // ... параметры токена ...
+    await expect(
+      factory.connect(user1).createToken(tokenParams, ethers.ZeroHash, { value: 0n })
+    ).to.be.revertedWithMatch("Insufficient payment");
+  });
+
+  it("Should allow referral earnings withdrawal", async function() {
+    // ... существующий код ...
+    const gasUsed = receipt.gasUsed * receipt.gasPrice;
+    const balanceAfter = await ethers.provider.getBalance(await user1.getAddress());
+    expect(balanceAfter + gasUsed).to.be.gt(balanceBefore);
+  });
+});
+-
+2. Текущие проблемы и их решения:
+// Проблема 1: Устаревшие методы ethers
+ethers.constants.HashZero -> ethers.ZeroHash
+ethers.utils.parseEther -> ethers.parseEther
+owner.address -> await owner.getAddress()
+
+// Проблема 2: Математические операции
+fee.mul(2) -> fee * 2n
+balance.sub(amount) -> balance - amount
+
+// Проблема 3: Проверки ошибок
+.to.be.revertedWith("Error") -> .to.be.revertedWithMatch("Error")
+
+// Проблема 4: BigInt литералы
+expect(value).to.equal(0) -> expect(value).to.equal(0n)
+-
+Структура контракта TokenFactory:
+contract TokenFactory is Ownable {
+    uint256 public fee;
+    uint256 public referralPercent;
+    address public immutable PAYMENT_RECEIVER;
+    
+    mapping(address => ReferralInfo) public referralInfo;
+    mapping(bytes32 => address) public referralCodeOwner;
+    
+    struct ReferralInfo {
+        bytes32 referralCode;
+        uint256 referralsCount;
+        uint256 pendingEarnings;
+        address[] referredUsers;
+    }
+    
+    // ... остальной код ...
+}-
+
+4. Основные функции для тестирования:
+createToken
+generateReferralCode
+withdrawReferralEarnings
+setFee
+setReferralPercent
+updateReferralCode
+-
+Следующие шаги для деплоя:
+// scripts/deploy.js
+async function main() {
+  const TokenFactory = await ethers.getContractFactory("TokenFactory");
+  const factory = await TokenFactory.deploy();
+  await factory.waitForDeployment();
+  
+  console.log("TokenFactory deployed to:", await factory.getAddress());
+}
+-
+Для верификации контракта:
+// hardhat.config.js дополнения
+module.exports = {
+  etherscan: {
+    apiKey: process.env.ETHERSCAN_API_KEY
+  },
+  networks: {
+    sepolia: {
+      url: process.env.SEPOLIA_URL,
+      accounts: [process.env.PRIVATE_KEY]
+    }
+  }
+};
+Это поможет нам завтра быстро восстановить контекст и продолжить работу либо с исправлением тестов, либо с деплоем в тестнете.
+-
+
+Текущие ошибки в контракте и их решения:
+// TokenFactory.sol
+// Кастомные ошибки, которые нужно добавить
+error InsufficientPayment();
+error CodeAlreadyExists();
+error TaxTooHigh();
+error AmountTooSmall();
+error InvalidWhitelistAddress();
+error SupplyExceedsMax();
+error NameTooLong();
+error NoExistingCode();
+error ReferralPercentTooHigh();
+-
+Важные константы и параметры:
+uint256 public constant MAX_TAX = 25;
+uint256 public constant MAX_REFERRAL_PERCENT = 50;
+uint256 public constant MIN_WITHDRAWAL = 0.001 ether;
+uint256 public constant MAX_NAME_LENGTH = 32;
+-
+ Последние изменения в тестах:
+// Было
+const referralCode = ethers.constants.HashZero;
+const zeroAddress = ethers.constants.AddressZero;
+const amount = ethers.utils.parseEther("1");
+
+// Стало
+const referralCode = ethers.ZeroHash;
+const zeroAddress = ethers.ZeroAddress;
+const amount = ethers.parseEther("1");
+-
+Интерфейс токена:
+interface IToken {
+    function initialize(
+        string memory name,
+        string memory symbol,
+        uint256 totalSupply,
+        address[] memory whitelist,
+        uint8 buyTax,
+        uint8 sellTax,
+        uint8 walletTax,
+        string memory logoUrl,
+        string memory website,
+        string memory telegram,
+        bool salesLocked,
+        bool mintable,
+        uint256 maxSupply
+    ) external;
+}
+-
+Зависимости контрактов:
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol
+-
+Газовая оптимизация:
+// Используем unchecked для экономии газа
+unchecked {
+    referralInfo.referralsCount++;
+    totalSupply += amount;
+}
+-
+События для отслеживания:
+event TokenCreated(address indexed token, address indexed creator);
+event ReferralCodeGenerated(address indexed user, bytes32 indexed code);
+event ReferralEarningsWithdrawn(address indexed user, uint256 amount);
+event FeeUpdated(uint256 newFee);
+event ReferralPercentUpdated(uint256 newPercent);
+-
+Проверки безопасности:
+require(msg.value >= fee, "Insufficient payment");
+require(buyTax <= MAX_TAX, "Tax too high");
+require(totalSupply <= maxSupply, "Supply > Max Supply");
+require(bytes(name).length <= MAX_NAME_LENGTH, "Name too long");

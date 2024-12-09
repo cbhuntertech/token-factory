@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./Token.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+
+contract TokenFactory is Ownable {
+    struct TokenParams {
+        string name;
+        string symbol;
+        uint256 totalSupply;
+        address[] whitelist;
+        uint256 buyTax;
+        uint256 sellTax;
+        uint256 walletTax;
+        string logoUrl;
+        bool mintable;
+        uint256 maxSupply;
+    }
+
+    mapping(address => address[]) public creatorTokens;
+    
+    uint256 public fee = 0.001 ether;
+    address public immutable PAYMENT_RECEIVER;
+    
+    event TokenCreated(address indexed token, address indexed creator);
+    event LiquidityAdded(address indexed token, uint256 tokenAmount, uint256 bnbAmount);
+    event TradingEnabled(address indexed token);
+    event LiquidityRemoved(address indexed token, uint256 lpAmount);
+    event FeeUpdated(uint256 newFee);
+
+    constructor() {
+        PAYMENT_RECEIVER = msg.sender;
+    }
+
+    function createToken(TokenParams memory params) external payable returns (address) {
+        require(msg.value >= fee, "Insufficient fee");
+        require(params.totalSupply <= params.maxSupply, "Supply > Max Supply");
+        
+        // Отправляем оплату
+        (bool success, ) = payable(PAYMENT_RECEIVER).call{value: fee}("");
+        require(success, "Payment transfer failed");
+        
+        // Возвращаем излишек
+        if(msg.value > fee) {
+            (success, ) = payable(msg.sender).call{value: msg.value - fee}("");
+            require(success, "Refund failed");
+        }
+
+        Token newToken = new Token(
+            params.name,
+            params.symbol,
+            params.totalSupply,
+            params.whitelist,
+            params.buyTax,
+            params.sellTax,
+            params.walletTax,
+            params.logoUrl,
+            params.mintable,
+            params.maxSupply,
+            msg.sender
+        );
+
+        address tokenAddress = address(newToken);
+        creatorTokens[msg.sender].push(tokenAddress);
+        
+        emit TokenCreated(tokenAddress, msg.sender);
+        return tokenAddress;
+    }
+
+    function addLiquidityForToken(
+        address tokenAddress,
+        address routerAddress,
+        uint256 tokenAmount
+    ) external payable {
+        Token token = Token(tokenAddress);
+        require(token.getCreator() == msg.sender, "Not token creator");
+        
+        token.addLiquidityV2(routerAddress, tokenAmount, msg.value);
+        
+        emit LiquidityAdded(tokenAddress, tokenAmount, msg.value);
+    }
+
+    function removeLiquidityForToken(
+        address tokenAddress,
+        address routerAddress,
+        uint256 lpAmount
+    ) external {
+        Token token = Token(tokenAddress);
+        require(token.getCreator() == msg.sender, "Not token creator");
+        
+        token.removeLiquidityV2(routerAddress, lpAmount);
+        
+        emit LiquidityRemoved(tokenAddress, lpAmount);
+    }
+
+    function getCreatorTokens(address creator) external view returns (address[] memory) {
+        return creatorTokens[creator];
+    }
+
+    function setFee(uint256 _fee) external onlyOwner {
+        fee = _fee;
+        emit FeeUpdated(_fee);
+    }
+
+    // Функция для вывода BNB
+    function withdrawBNB() external onlyOwner {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No BNB to withdraw");
+        
+        (bool success, ) = payable(owner()).call{value: balance}("");
+        require(success, "BNB transfer failed");
+    }
+
+    // Функция для вывода токенов
+    function withdrawToken(address tokenAddress) external onlyOwner {
+        Token token = Token(tokenAddress);
+        uint256 balance = token.balanceOf(address(this));
+        require(balance > 0, "No tokens to withdraw");
+        
+        require(token.transfer(owner(), balance), "Token transfer failed");
+    }
+
+    // Получить баланс BNB
+    function getBalance() external view returns (uint256) {
+        return address(this).balance;
+    }
+}
